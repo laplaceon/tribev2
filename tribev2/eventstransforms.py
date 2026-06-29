@@ -111,7 +111,8 @@ class ExtractWordsFromAudio(EventsTransform):
             logger.info("Running whisperx via uvx...")
             cmd = [
                 "uvx",
-                "--with pyannote.audio==3.1.1",
+                "--with",
+                "pyannote.audio==3.1.1",
                 "whisperx",
                 str(wav_filename),
                 "--model",
