@@ -160,21 +160,35 @@ class FmriEncoderModel(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
-    def forward(self, batch: SegmentData, pool_outputs: bool = True) -> torch.Tensor:
+    def forward(self, batch: SegmentData, pool_outputs: bool = True, return_hiddens: bool = False) -> torch.Tensor | tuple[torch.Tensor, dict]:
         x = self.aggregate_features(batch)  # B, T, H
         subject_id = batch.data.get("subject_id", None)
+        
         if hasattr(self, "temporal_smoothing"):
             x = self.temporal_smoothing(x.transpose(1, 2)).transpose(1, 2)
+            
+        hiddens_dict = {}
         if not self.config.linear_baseline:
-            x = self.transformer_forward(x, subject_id)
-        x = x.transpose(1, 2)  # B, H, T
+            if return_hiddens:
+                x, pre_enc = self.transformer_forward(x, subject_id, return_hiddens=True)
+                hiddens_dict["pre_encoder"] = pre_enc
+                hiddens_dict["post_encoder"] = x
+            else:
+                x = self.transformer_forward(x, subject_id)
+                
+        x_t = x.transpose(1, 2)  # B, H, T
         if self.config.low_rank_head is not None:
-            x = self.low_rank_head(x.transpose(1, 2)).transpose(1, 2)
-        x = self.predictor(x, subject_id)  # B, O, T
+            x_t = self.low_rank_head(x_t.transpose(1, 2)).transpose(1, 2)
+        
+        out_raw = self.predictor(x_t, subject_id)  # B, O, T
+        
         if pool_outputs:
-            out = self.pooler(x)  # B, O, T'
+            out = self.pooler(out_raw)  # B, O, T'
         else:
-            out = x
+            out = out_raw
+            
+        if return_hiddens:
+            return out, hiddens_dict
         return out
 
     def aggregate_features(self, batch):
@@ -224,11 +238,17 @@ class FmriEncoderModel(nn.Module):
                 out[batch_idx, mask, :] = torch.zeros_like(out[batch_idx, mask, :])
         return out
 
-    def transformer_forward(self, x, subject_id=None):
+    def transformer_forward(self, x, subject_id=None, return_hiddens=False):
         x = self.combiner(x)
         if hasattr(self, "time_pos_embed"):
             x = x + self.time_pos_embed[:, : x.size(1)]
         if hasattr(self, "subject_embed"):
             x = x + self.subject_embed(subject_id)
-        x = self.encoder(x)
-        return x
+            
+        pre_encoder_hiddens = x # Capture the 1152-D concatenated state
+        
+        x_out = self.encoder(x)
+        
+        if return_hiddens:
+            return x_out, pre_encoder_hiddens
+        return x_out

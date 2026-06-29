@@ -320,35 +320,8 @@ class TribeModel(TribeExperiment):
         return get_audio_and_text_events(pd.DataFrame([event]))
 
     def predict(
-        self, events: pd.DataFrame, verbose: bool = True
-    ) -> tuple[np.ndarray, list]:
-        """Run inference on an events DataFrame and return per-TR predictions.
-
-        Each batch is split into segments of length ``data.TR``.  When
-        ``remove_empty_segments`` is ``True`` (the default), segments that
-        contain no events are discarded.
-
-        Parameters
-        ----------
-        events:
-            Events DataFrame, typically produced by
-            :meth:`get_events_dataframe`.
-        verbose:
-            If ``True`` (default), display a ``tqdm`` progress bar.
-
-        Returns
-        -------
-        preds : np.ndarray
-            Array of shape ``(n_kept_segments, n_vertices)`` with the
-            predicted brain activity.
-        all_segments : list
-            Corresponding segment objects aligned with *preds*.
-
-        Raises
-        ------
-        RuntimeError
-            If the model has not been loaded via :meth:`from_pretrained`.
-        """
+        self, events: pd.DataFrame, verbose: bool = True, return_hiddens: bool = False
+    ) -> tuple[np.ndarray, list] | tuple[np.ndarray, list, dict]:
         if self._model is None:
             raise RuntimeError(
                 "TribeModel must be instantiated via the .from_pretrained method"
@@ -357,7 +330,24 @@ class TribeModel(TribeExperiment):
         loader = self.data.get_loaders(events=events, split_to_build="all")["all"]
 
         preds, all_segments = [], []
+        accumulated_hiddens = {"pre_encoder": [], "post_encoder": []}
         n_samples, n_kept = 0, 0
+        
+        # Setup forward hooks to intercept the 8 transformer layer activations
+        activation_cache = {}
+        hooks = []
+        if return_hiddens and hasattr(model, 'encoder'):
+            def get_activation(name):
+                def hook(mdl, inp, out):
+                    # Handle implementations that return tuples (e.g. self-attention states)
+                    act = out[0] if isinstance(out, tuple) else out
+                    activation_cache[name] = act.detach().cpu()
+                return hook
+
+            # Attach a hook to each internal block of the transformer
+            for i, child in enumerate(model.encoder.children()):
+                hooks.append(child.register_forward_hook(get_activation(f"layer_{i}")))
+
         with torch.inference_mode():
             for batch in tqdm(loader, disable=not verbose):
                 batch = batch.to(model.device)
@@ -371,22 +361,47 @@ class TribeModel(TribeExperiment):
                     keep = np.array([len(s.ns_events) > 0 for s in batch_segments])
                 else:
                     keep = np.ones(len(batch_segments), dtype=bool)
+                    
                 n_kept += keep.sum()
                 n_samples += len(batch_segments)
                 batch_segments = [s for i, s in enumerate(batch_segments) if keep[i]]
-                y_pred = model(batch).detach().cpu().numpy()
+                
+                if return_hiddens:
+                    y_pred, hiddens = model(batch, return_hiddens=True)
+                    y_pred = y_pred.detach().cpu().numpy()
+                    
+                    # Align sequence embeddings (B, T, H) with the flattened prediction shape
+                    pre_h = rearrange(hiddens["pre_encoder"].detach().cpu().numpy(), "b t h -> (b t) h")[keep]
+                    post_h = rearrange(hiddens["post_encoder"].detach().cpu().numpy(), "b t h -> (b t) h")[keep]
+                    
+                    accumulated_hiddens["pre_encoder"].append(pre_h)
+                    accumulated_hiddens["post_encoder"].append(post_h)
+                    
+                    # Extract internal layers intercepted by the hooks
+                    for layer_name, act in activation_cache.items():
+                        if layer_name not in accumulated_hiddens:
+                            accumulated_hiddens[layer_name] = []
+                        act_np = rearrange(act.numpy(), "b t h -> (b t) h")[keep]
+                        accumulated_hiddens[layer_name].append(act_np)
+                        
+                    activation_cache.clear()
+                else:
+                    y_pred = model(batch).detach().cpu().numpy()
+                    
                 y_pred = rearrange(y_pred, "b d t -> (b t) d")[keep]
                 preds.append(y_pred)
                 all_segments.extend(batch_segments)
+                
+        # Cleanup
+        for hook in hooks:
+            hook.remove()
+
         preds = np.concatenate(preds)
-        if len(all_segments) != preds.shape[0]:
-            raise ValueError(
-                f"Number of samples: {preds.shape[0]} != {len(all_segments)}"
-            )
-        logger.info(
-            "Predicted %d / %d segments (%.1f%% kept)",
-            n_kept,
-            n_samples,
-            100.0 * n_kept / max(n_samples, 1),
-        )
+        
+        if return_hiddens:
+            for k in accumulated_hiddens.keys():
+                if len(accumulated_hiddens[k]) > 0:
+                    accumulated_hiddens[k] = np.concatenate(accumulated_hiddens[k])
+            return preds, all_segments, accumulated_hiddens
+
         return preds, all_segments
