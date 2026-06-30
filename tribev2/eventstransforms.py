@@ -111,10 +111,7 @@ class ExtractWordsFromAudio(EventsTransform):
             logger.info("Running whisperx via uvx...")
             cmd = [
                 "uvx",
-                "--python", "3.10",
-                "--with", "pyannote.audio==3.1.1",
-                "--with", "numpy<2.0",
-                "--with", "torchaudio<2.2.0",
+                "--from", "git+https://github.com/m-bain/whisperx.git",
                 "whisperx",
                 str(wav_filename),
                 "--model",
