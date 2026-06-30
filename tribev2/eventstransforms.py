@@ -113,6 +113,7 @@ class ExtractWordsFromAudio(EventsTransform):
                 "uvx",
                 "--python", "3.10",
                 "--with", "pyannote.audio==3.1.1",
+                "--with", "numpy<2.0",
                 "--with", "torchaudio<2.2.0",
                 "whisperx",
                 str(wav_filename),
