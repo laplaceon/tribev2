@@ -155,6 +155,34 @@ class FmriEncoderModel(nn.Module):
             if config.subject_embedding:
                 self.subject_embed = nn.Embedding(config.n_subjects, hidden)
             self.encoder = config.encoder.build(dim=hidden)
+        
+        if not config.linear_baseline:
+            if config.time_pos_embedding:
+                self.time_pos_embed = nn.Parameter(
+                    torch.randn(1, config.max_seq_len, hidden)
+                )
+            if config.subject_embedding:
+                self.subject_embed = nn.Embedding(config.n_subjects, hidden)
+            self.encoder = config.encoder.build(dim=hidden)
+            
+            # --- NEW: DISTILLATION HOOKS ---
+            self._layer_activations = {}
+            
+            def get_activation(name):
+                def hook(module, input, output):
+                    # Handle cases where the transformer block returns a tuple
+                    act = output[0] if isinstance(output, tuple) else output
+                    self._layer_activations[name] = act
+                return hook
+            
+            # Hook 1: Capture the 1152-D state just before it enters Layer 0
+            self.encoder.register_forward_pre_hook(
+                lambda m, i: self._layer_activations.update({'pre_encoder': i[0]})
+            )
+            
+            # Hooks 2-9: Capture outputs of all 8 internal Transformer blocks
+            for i, block in enumerate(self.encoder.children()):
+                block.register_forward_hook(get_activation(f"layer_{i}"))
 
     @property
     def device(self) -> torch.device:
@@ -167,19 +195,13 @@ class FmriEncoderModel(nn.Module):
         if hasattr(self, "temporal_smoothing"):
             x = self.temporal_smoothing(x.transpose(1, 2)).transpose(1, 2)
             
-        hiddens_dict = {}
         if not self.config.linear_baseline:
-            if return_hiddens:
-                x, pre_enc = self.transformer_forward(x, subject_id, return_hiddens=True)
-                hiddens_dict["pre_encoder"] = pre_enc
-                hiddens_dict["post_encoder"] = x
-            else:
-                x = self.transformer_forward(x, subject_id)
-                
+            x = self.transformer_forward(x, subject_id)
+            
         x_t = x.transpose(1, 2)  # B, H, T
         if self.config.low_rank_head is not None:
             x_t = self.low_rank_head(x_t.transpose(1, 2)).transpose(1, 2)
-        
+            
         out_raw = self.predictor(x_t, subject_id)  # B, O, T
         
         if pool_outputs:
@@ -187,8 +209,10 @@ class FmriEncoderModel(nn.Module):
         else:
             out = out_raw
             
+        # --- NEW: Return hidden states if requested ---
         if return_hiddens:
-            return out, hiddens_dict
+            return out, self._layer_activations
+            
         return out
 
     def aggregate_features(self, batch):
