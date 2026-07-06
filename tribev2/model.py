@@ -175,14 +175,19 @@ class FmriEncoderModel(nn.Module):
                     self._layer_activations[name] = act
                 return hook
             
-            # Hook 1: Capture the 1152-D state just before it enters Layer 0
+            # Hook 1: Capture the 1152-D state just before it enters the first Attention block
             self.encoder.register_forward_pre_hook(
                 lambda m, i: self._layer_activations.update({'pre_encoder': i[0]})
             )
             
-            # Hooks 2-9: Capture outputs of all 8 internal Transformer blocks
-            for i, block in enumerate(self.encoder.children()):
-                block.register_forward_hook(get_activation(f"layer_{i}"))
+            # Hooks 2-9: x-transformers splits Attention and FeedForward into separate blocks.
+            # Even indices (0, 2, 4...) are Attention. Odd indices (1, 3, 5...) are FeedForward.
+            # We hook the output of the odd-indexed FeedForward blocks to capture the completed layer.
+            if hasattr(self.encoder, 'layers'):
+                layer_count = 0
+                for i in range(1, len(self.encoder.layers), 2):
+                    self.encoder.layers[i].register_forward_hook(get_activation(f"layer_{layer_count}"))
+                    layer_count += 1
 
     @property
     def device(self) -> torch.device:
