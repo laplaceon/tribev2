@@ -180,13 +180,13 @@ class FmriEncoderModel(nn.Module):
                 lambda m, i: self._layer_activations.update({'pre_encoder': i[0]})
             )
             
-            # Hooks 2-9: x-transformers splits Attention and FeedForward into separate blocks.
-            # Even indices (0, 2, 4...) are Attention. Odd indices (1, 3, 5...) are FeedForward.
-            # We hook the output of the odd-indexed FeedForward blocks to capture the completed layer.
+            # Hooks 2-9: Attach to the 'Residual' module, which executes the final step of the layer
             if hasattr(self.encoder, 'layers'):
                 layer_count = 0
                 for i in range(1, len(self.encoder.layers), 2):
-                    self.encoder.layers[i].register_forward_hook(get_activation(f"layer_{layer_count}"))
+                    # self.encoder.layers[i] is the ModuleList container.
+                    # Index [2] is the actual Residual module completing the computation.
+                    self.encoder.layers[i][2].register_forward_hook(get_activation(f"layer_{layer_count}"))
                     layer_count += 1
 
     @property
