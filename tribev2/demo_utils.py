@@ -358,8 +358,8 @@ class TribeModel(TribeExperiment):
                     for layer_name, tensor in hiddens_dict.items():
                         if layer_name not in hiddens_cache:
                             hiddens_cache[layer_name] = []
-                        # Reshape from [Batch, Time, Dim] to [Flat, Dim] using the valid mask
-                        flat_tensor = rearrange(tensor.detach().cpu().numpy(), "b t d -> (b t) d")[keep]
+                        # FIX: Remove [keep] from here! The Transformer timescale != fMRI timescale.
+                        flat_tensor = rearrange(tensor.detach().cpu().numpy(), "b t d -> (b t) d")
                         hiddens_cache[layer_name].append(flat_tensor)
                 else:
                     y_pred = model(batch).detach().cpu().numpy()
